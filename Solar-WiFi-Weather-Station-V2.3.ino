@@ -1,102 +1,5 @@
-
-/*----------------------------------------------------------------------------------------------------
-  Project Name : Solar Powered WiFi Weather Station V2.34
-  Features: temperature, dewpoint, dewpoint spread, heat index, humidity, absolute pressure, relative pressure, battery status and
-  the famous Zambretti Forecaster (multi lingual)
-  Authors: Keith Hungerford, Debasish Dutta and Marc Stähli
-  Website : www.opengreenenergy.com
-  
-  Main microcontroller (ESP8266) and BME280 both sleep between measurements
-  BME280 is used in single shot mode ("forced mode")
-
-  CODE: https://github.com/3KUdelta/Solar_WiFi_Weather_Station
-  INSTRUCTIONS & HARDWARE: https://www.instructables.com/id/Solar-Powered-WiFi-Weather-Station-V20/
-  3D FILES: https://www.thingiverse.com/thing:3551386
-
-  CREDITS:
-  
-  Inspiration and code fragments of Dewpoint and Heatindex calculations are taken from:  
-  https://arduinotronics.blogspot.com/2013/12/temp-humidity-w-dew-point-calcualtions.html
-
-  For Zambretti Ideas:
-  http://drkfs.net/zambretti.htm or http://integritext.net/DrKFS/zambretti.htm
-  https://raspberrypiandstuff.wordpress.com
-  David Bird: https://github.com/G6EJD/ESP32_Weather_Forecaster_TN061
-
-  Needed libraries:
-  <Adafruit_Sensor.h>    --> Adafruit unified sensor
-  <Adafruit_BME280.h>    --> Adafrout BME280 sensor
-  <BlynkSimpleEsp8266.h> --> https://github.com/blynkkk/blynk-library
-  <ESP8266WiFi.h>
-  <WiFiUdp.h>
-  "FS.h"
-  <EasyNTPClient.h>      --> https://github.com/aharshac/EasyNTPClient
-  <TimeLib.h>            --> https://github.com/PaulStoffregen/Time.git
-
-  CREDITS for Adafruit libraries:
-  
-  This is a library for the BME280 humidity, temperature & pressure sensor
-  Designed specifically to work with the Adafruit BME280 Breakout
-  ----> http://www.adafruit.com/products/2650
-  These sensors use I2C or SPI to communicate, 2 or 4 pins are required
-  to interface. The device's I2C address is either 0x76 or 0x77.
-  Adafruit invests time and resources providing this open source code,
-  please support Adafruit andopen-source hardware by purchasing products
-  from Adafruit!
-  Written by Limor Fried & Kevin Townsend for Adafruit Industries.
-  BSD license, all text above must be included in any redistribution
-  
-  Hardware Settings Mac: 
-  LOLIN(WEMOS) D1 mini Pro, 80 MHz, Flash, 16M (14M SPIFFS), v2 Lower Memory, Disable, None, Only Sketch, 921600 on /dev/cu.SLAB_USBtoUART
-
-  major update on 15/05/2019
-
-  -added Zambretti Forecster
-  -added translation feature
-  -added English language
-  -added German language
-
-  updated on 03/06/2019
-
-  -added Dewpoint Spread
-  -minor code corrections
-
-  updated 28/06/19
-  -added Italian and Polish tranlation (Chak10) and (TomaszDom)
- 
-  updated 27/11/19 to V2.32
-  -added battery protection at 3.3V, sending "batt empty" message and go to hybernate mode
-
- updated 11/05/20 to v2.33
-  -corrected bug in adjustments for summer/winter
-  
- updated 27/05/20 to v2.34
-  - added August-Roche-Magnus approximation to automatically adjust humidity with temperature corrections
-  
-
-////  Features :  //////////////////////////////////////////////////////////////////////////////////////////////////////
-                                                                                                                         
-// 1. Connect to Wi-Fi, and upload the data to either Blynk App and/or Thingspeak
-
-// 2. Monitoring Weather parameters like Temperature, Pressure abs, Pressure MSL and Humidity.
-
-// 3. Extra Ports to add more Weather Sensors like UV Index, Light and Rain Guage etc.
-
-// 4. Remote Battery Status Monitoring
-
-// 5. Using Sleep mode to reduce the energy consumed                                        
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-/***************************************************
- * VERY IMPORTANT:                                 *
- *                                                 *
- * Enter your personal settings in Settings.h !    *
- *                                                 *
- **************************************************/
-
-#include "Settings.h"
-#include "Translation.h"
+#include "settings.h"
+#include "translation.h"
 
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
@@ -106,14 +9,21 @@
 #include "FS.h"
 #include <EasyNTPClient.h>       //https://github.com/aharshac/EasyNTPClient
 #include <TimeLib.h>             //https://github.com/PaulStoffregen/Time.git
+#include "Adafruit_SI1145.h"
+#include <InfluxDb.h>;
 
-Adafruit_BME280 bme;             // I2C
+Adafruit_BME280 bme;                    // I2C
+Adafruit_SI1145 uv = Adafruit_SI1145(); // I2C
 WiFiUDP udp;
+
 EasyNTPClient ntpClient(udp, NTP_SERVER, TZ_SEC + DST_SEC);
 
 float measured_temp;
 float measured_humi;
 float measured_pres;
+float measured_UVindex;
+float measured_Vis;
+float measured_IR;
 float adjusted_temp;
 float adjusted_humi;
 float SLpressure_hPa;               // needed for rel pressure calculation
@@ -147,7 +57,7 @@ void setup() {
   
   Serial.begin(115200);
   Serial.println();
-  Serial.println("Start of SolarWiFiWeatherStation V2.32");
+  Serial.println("Start of SolarWiFiWeatherStation V2.34");
 
   //******Battery Voltage Monitoring*********************************************
   
@@ -174,7 +84,7 @@ void setup() {
       Serial.println("Could not connect to WiFi!");
       Serial.println("Going to sleep for 10 minutes and try again.");
       if (volt > 3.3){
-        goToSleep(10);   // go to sleep and retry after 10 min
+        goToSleep(sleepTimeMin);   // go to sleep and retry after sleepTimeMin (defaukt is 10) min
       }  
       else{
         goToSleep(0);   // hybernate because batt empty
@@ -186,7 +96,7 @@ void setup() {
     
   if (App1 == "BLYNK") {        // for posting data to Blynk App
     Blynk.begin(auth, ssid, pass);
-  } 
+  }
   
   //*****************Checking if SPIFFS available********************************
 
@@ -248,7 +158,11 @@ void setup() {
                 Adafruit_BME280::SAMPLING_X1, // pressure
                 Adafruit_BME280::SAMPLING_X1, // humidity
                 Adafruit_BME280::FILTER_OFF   );
- 
+
+
+  if (! uv.begin()) {
+    Serial.println("Didn't find Si1145 sensor, check wiring!");
+  } 
   measurementEvent();            //get all data from the different sensors
   
   //*******************SPIFFS operations***************************************************************
@@ -366,6 +280,64 @@ void setup() {
       Serial.print(line);
     }
   }
+
+  if (App4 == "INFLUX") {
+  // Send data to local INFLUX DB
+  Serial.println("INFO: Open the INFLUX connection");
+   Influxdb influx(INFLUXDB_HOST, INFLUXDB_PORT);
+  influx.setDbAuth(INFLUXDB_DATABASE, INFLUXDB_USER, INFLUXDB_PASS);  
+  
+  InfluxData row1("weatherstation");
+  row1.addTag("node", "solarweatherstation");
+  row1.addTag("sensor", "BME");
+  row1.addTag("mode", "single");
+  row1.addValue("BME_tempc", measured_temp);
+  row1.addValue("BME_humi", measured_humi);
+  row1.addValue("BME_abshpa", measured_pres);
+  row1.addValue("BME_relhpa", rel_pressure_rounded);
+  row1.addValue("dewpointc", DewpointTemperature);
+  row1.addValue("spreadc", DewPointSpread);
+  row1.addValue("heatindexc", HeatIndex);
+  influx.write(row1);
+
+/*  InfluxData row2("weatherstation");
+  row2.addTag("node", "solarweatherstation");
+  row2.addTag("sensor", "DHT");
+  row2.addTag("mode", "single");
+  row2.addValue("DHT_humi", temperature_DHT);
+  row2.addValue("DHT_tempc", humidity_DHT);
+  influx.write(row2);
+*/
+  InfluxData row3("weatherstation");
+  row3.addTag("node", "solarweatherstation");
+  row3.addTag("sensor", "systemboard");
+  row3.addTag("mode", "single");
+  row3.addValue("battv", volt);
+  influx.write(row3);
+
+  /* remove on weatherstation in garden
+  InfluxData row4("weatherstation");
+  row4.addTag("node", "solarweatherstation");
+  row4.addTag("sensor", "CCS811");
+  row4.addTag("mode", "single");
+  row4.addValue("valueCO2", value_CO2);
+  row4.addValue("valueTVOC", value_TVOC);
+  influx.write(row4);
+*/
+
+  InfluxData row5("weatherstation");
+  row5.addTag("node", "solarweatherstation");
+  row5.addTag("sensor", "SI1145");
+  row5.addTag("mode", "single");
+  row5.addValue("valueUVindex",  measured_UVindex);
+  row5.addValue("valueVisibleLight",  measured_Vis);
+  row5.addValue("valueVisibleIR",  measured_IR);
+  influx.write(row5);
+
+  Serial.println("INFO: Closing the INFLUX connection");
+  }
+
+  
   if (volt > 3.3) {          //check if batt still ok, if yes
     goToSleep(sleepTimeMin); //go for a nap
   }
@@ -404,6 +376,16 @@ void measurementEvent() {
   Serial.print("Pressure: ");
   Serial.print(measured_pres);
   Serial.print("hPa; ");
+
+  measured_UVindex = uv.readUV();
+  // the index is multiplied by 100 so to get the integer index, divide by 100!
+  measured_UVindex /= 100.0;  
+  measured_Vis = uv.readVisible();
+  measured_IR = uv.readIR();
+  Serial.print("UVindex: "); Serial.print(measured_UVindex);
+  Serial.print("; Vis: "); Serial.print(measured_Vis);
+  Serial.print("; IR: "); Serial.print(measured_IR);
+  Serial.print("; ");
 
   // Calculate and print relative pressure
   SLpressure_hPa = (((measured_pres * 100.0)/pow((1-((float)(ELEVATION))/44330), 5.255))/100.0);
